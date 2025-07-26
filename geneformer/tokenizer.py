@@ -87,6 +87,7 @@ def sum_ensembl_ids(
     gene_mapping_dict,
     gene_token_dict,
     custom_attr_name_dict,
+    use_h5ad_index,
     file_format="loom",
     chunk_size=512,
 ):
@@ -207,6 +208,9 @@ def sum_ensembl_ids(
 
         data = sc.read_h5ad(str(data_directory))
 
+        if use_h5ad_index:
+            data.var["ensembl_id"] = list(data.var.index)
+
         assert (
             "ensembl_id" in data.var.columns
         ), "'ensembl_id' column missing from data.var"
@@ -297,6 +301,8 @@ class TranscriptomeTokenizer:
         model_input_size=4096,
         special_token=True,
         collapse_gene_ids=True,
+        use_h5ad_index=False,
+        keep_counts=False,
         model_version="V2",
         gene_median_file=GENE_MEDIAN_FILE,
         token_dictionary_file=TOKEN_DICTIONARY_FILE,
@@ -323,6 +329,11 @@ class TranscriptomeTokenizer:
             | For the V1 model series, should be False. For the V2 model series, should be True.
         collapse_gene_ids : bool = True
             | Whether to collapse gene IDs based on gene mapping dictionary.
+        use_h5ad_index : bool = False
+            | use index as Ensembl IDs (only available for h5ad, only if collapse_gene_ids is True)
+        keep_counts : bool = False
+            | Whether to keep a dataset column that represents gene counts normalized by total cell counts
+            | Counts will be ordered by the gene rank order within the tokenized rank value encoding for each cell.
         model_version : str
             | To auto-select settings for model version other than current default.
             | Current options: V1: models pretrained on ~30M cells, V2: models pretrained on ~104M cells
@@ -394,6 +405,12 @@ class TranscriptomeTokenizer:
         # if collapsing duplicate gene IDs
         self.collapse_gene_ids = collapse_gene_ids
 
+        # if using h5ad index as ensembl_ids
+        self.use_h5ad_index = use_h5ad_index
+
+        # if keeping counts within dataset column
+        self.keep_counts = keep_counts
+
         # load gene mappings dictionary (Ensembl IDs:Ensembl ID)
         if gene_mapping_file is not None:
             with open(gene_mapping_file, "rb") as f:
@@ -419,6 +436,7 @@ class TranscriptomeTokenizer:
         output_directory: Path | str,
         output_prefix: str,
         file_format: Literal["loom", "h5ad"] = "loom",
+        input_identifier: str = "",
         use_generator: bool = False,
     ):
         """
@@ -434,16 +452,20 @@ class TranscriptomeTokenizer:
             | Prefix for output .dataset
         file_format : str
             | Format of input files. Can be "loom" or "h5ad".
+        input_identifier : str
+            | Substring identifier for input .loom or .h5ad, only matches are tokenized
+            | Default is no identifier, tokenizes all files in provided directory.
         use_generator : bool
             | Whether to use generator or dict for tokenization.
 
         """
-        tokenized_cells, cell_metadata = self.tokenize_files(
-            Path(data_directory), file_format
+        tokenized_cells, cell_metadata, tokenized_counts = self.tokenize_files(
+            Path(data_directory), file_format, input_identifier
         )
         tokenized_dataset = self.create_dataset(
             tokenized_cells,
             cell_metadata,
+            tokenized_counts,
             use_generator=use_generator,
         )
 
@@ -451,9 +473,10 @@ class TranscriptomeTokenizer:
         tokenized_dataset.save_to_disk(str(output_path))
 
     def tokenize_files(
-        self, data_directory, file_format: Literal["loom", "h5ad"] = "loom"
+        self, data_directory, file_format: Literal["loom", "h5ad"] = "loom", input_identifier: str = ""
     ):
         tokenized_cells = []
+        tokenized_counts = []
         if self.custom_attr_name_dict is not None:
             cell_attr = [attr_key for attr_key in self.custom_attr_name_dict.keys()]
             cell_metadata = {
@@ -466,11 +489,16 @@ class TranscriptomeTokenizer:
         tokenize_file_fn = (
             self.tokenize_loom if file_format == "loom" else self.tokenize_anndata
         )
-        for file_path in data_directory.glob(f"*.{file_format}"):
+        if input_identifier == "":
+            file_match = f"*.{file_format}"
+        else:
+            file_match = f"*{input_identifier}*.{file_format}"
+        for file_path in data_directory.glob(file_match):
             file_found = 1
             print(f"Tokenizing {file_path}")
-            file_tokenized_cells, file_cell_metadata = tokenize_file_fn(file_path)
+            file_tokenized_cells, file_cell_metadata, file_tokenized_counts = tokenize_file_fn(file_path)
             tokenized_cells += file_tokenized_cells
+            tokenized_counts += file_tokenized_counts
             if self.custom_attr_name_dict is not None:
                 for k in cell_attr:
                     cell_metadata[self.custom_attr_name_dict[k]] += file_cell_metadata[
@@ -484,7 +512,7 @@ class TranscriptomeTokenizer:
                 f"No .{file_format} files found in directory {data_directory}."
             )
             raise
-        return tokenized_cells, cell_metadata
+        return tokenized_cells, cell_metadata, tokenized_counts
 
     def tokenize_anndata(self, adata_file_path, target_sum=10_000):
         adata = sum_ensembl_ids(
@@ -492,7 +520,8 @@ class TranscriptomeTokenizer:
             self.collapse_gene_ids,
             self.gene_mapping_dict,
             self.gene_token_dict,
-            self.custom_attr_name_dict, 
+            self.custom_attr_name_dict,
+            self.use_h5ad_index,
             file_format="h5ad",
             chunk_size=self.chunk_size,
         )
@@ -532,6 +561,7 @@ class TranscriptomeTokenizer:
             filter_pass_loc = np.array([i for i in range(adata.shape[0])])
 
         tokenized_cells = []
+        tokenized_counts = []
 
         for i in range(0, len(filter_pass_loc), self.chunk_size):
             idx = filter_pass_loc[i : i + self.chunk_size]
@@ -539,13 +569,22 @@ class TranscriptomeTokenizer:
             n_counts = adata[idx].obs["n_counts"].values[:, None]
             X_view0 = adata[idx, :].X
             X_view = X_view0[:, coding_miRNA_loc]
-            X_norm = X_view / n_counts * target_sum / norm_factor_vector
+            X_norm_unscaled = X_view / n_counts * target_sum
+            X_norm = X_norm_unscaled / norm_factor_vector
             X_norm = sp.csr_matrix(X_norm)
+            X_norm_unscaled = sp.csr_matrix(X_norm_unscaled)
 
             tokenized_cells += [
                 rank_genes(X_norm[i].data, coding_miRNA_tokens[X_norm[i].indices])
                 for i in range(X_norm.shape[0])
             ]
+
+            if self.keep_counts:
+                X_norm_unscaled = sp.csr_matrix(X_norm_unscaled)
+                tokenized_counts += [
+                    rank_genes(X_norm[i].data, X_norm_unscaled[i].data)
+                    for i in range(X_norm.shape[0])
+                ]
 
             # add custom attributes for subview to dict
             if self.custom_attr_name_dict is not None:
@@ -554,7 +593,24 @@ class TranscriptomeTokenizer:
             else:
                 file_cell_metadata = None
 
-        return tokenized_cells, file_cell_metadata
+        # ensure no tokenized_cells are empty
+        empty_cell_indices = [i for i, cell in enumerate(tokenized_cells) if cell.size == 0]
+        if len(empty_cell_indices) > 0:
+            logger.warning(
+                "Warning: cells without any genes in token dictionary detected. This is unusual and may indicate empty droplets or otherwise invalid cells within the input data. Consider further QC prior to tokenization. Proceeding with excluding empty cells."
+            )
+            empty_cell_indices.sort(reverse=True) # for safe deletion
+            for index in empty_cell_indices: 
+                del tokenized_cells[index]
+                if self.keep_counts:
+                    del tokenized_counts[index]
+            # remove corresponding metadata
+            for k,v in file_cell_metadata.items():
+                for index in empty_cell_indices:
+                    del v[index]
+                file_cell_metadata[k] = v
+        
+        return tokenized_cells, file_cell_metadata, tokenized_counts
 
     def tokenize_loom(self, loom_file_path, target_sum=10_000):
         if self.custom_attr_name_dict is not None:
@@ -570,6 +626,7 @@ class TranscriptomeTokenizer:
             self.gene_mapping_dict,
             self.gene_token_dict,
             self.custom_attr_name_dict,
+            use_h5ad_index=False,
             file_format="loom",
             chunk_size=self.chunk_size,
         )
@@ -649,23 +706,27 @@ class TranscriptomeTokenizer:
         self,
         tokenized_cells,
         cell_metadata,
+        tokenized_counts,
         use_generator=False,
         keep_uncropped_input_ids=False,
     ):
         print("Creating dataset.")
         # create dict for dataset creation
         dataset_dict = {"input_ids": tokenized_cells}
+        if self.keep_counts:
+            dataset_dict["counts"] = tokenized_counts
+                    
         if self.custom_attr_name_dict is not None:
             dataset_dict.update(cell_metadata)
 
         # create dataset
         if use_generator:
-
             def dict_generator():
                 for i in range(len(tokenized_cells)):
                     yield {k: dataset_dict[k][i] for k in dataset_dict.keys()}
 
             output_dataset = Dataset.from_generator(dict_generator, num_proc=self.nproc)
+                
         else:
             output_dataset = Dataset.from_dict(dataset_dict)
 
@@ -688,9 +749,23 @@ class TranscriptomeTokenizer:
                     len(example["input_ids"]),
                     self.gene_token_dict.get("<eos>"),
                 )
+                if self.keep_counts:
+                    example["counts"] = example["counts"][
+                        0 : self.model_input_size - 2
+                    ]  # truncate to leave space for CLS and EOS token
+                    example["counts"] = np.insert(
+                        example["counts"], 0, 0.0
+                    )
+                    example["counts"] = np.insert(
+                        example["counts"],
+                        len(example["counts"]),
+                        0.0,
+                    )                   
             else:
                 # Truncate/Crop input_ids to input size
                 example["input_ids"] = example["input_ids"][0 : self.model_input_size]
+                if self.keep_counts:
+                    example["counts"] = example["counts"][0 : self.model_input_size]     
             example["length"] = len(example["input_ids"])
 
             return example
