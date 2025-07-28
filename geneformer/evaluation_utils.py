@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import torch
+import datasets
 from datasets.utils.logging import disable_progress_bar, enable_progress_bar
 from sklearn import preprocessing
 from sklearn.metrics import (
@@ -103,6 +104,10 @@ def classifier_predict(model, classifier_type, evalset, forward_batch_size, gene
         )
         padded_batch.set_format(type="torch")
 
+        # For datasets>=4.0.0, convert to dict to avoid format issues
+        if int(datasets.__version__.split(".")[0]) >= 4:
+            padded_batch = padded_batch[:]
+        
         input_data_batch = padded_batch["input_ids"]
         attn_msk_batch = padded_batch["attention_mask"]
         label_batch = padded_batch[label_name]
