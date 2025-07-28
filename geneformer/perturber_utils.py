@@ -9,6 +9,7 @@ from typing import List
 import numpy as np
 import pandas as pd
 import torch
+import datasets
 from datasets import Dataset, load_from_disk
 from peft import LoraConfig, get_peft_model
 from transformers import (
@@ -430,6 +431,11 @@ def remove_perturbed_indices_set(
 def make_perturbation_batch(
     example_cell, perturb_type, tokens_to_perturb, anchor_token, combo_lvl, num_proc
 ) -> tuple[Dataset, List[int]]:
+
+    # For datasets>=4.0.0, convert to dict to avoid format issues
+    if int(datasets.__version__.split(".")[0]) >= 4:
+        example_cell = example_cell[:]
+    
     if combo_lvl == 0 and tokens_to_perturb == "all":
         if perturb_type in ["overexpress", "activate"]:
             range_start = 1
