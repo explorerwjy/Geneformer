@@ -3,7 +3,7 @@ Geneformer tokenizer.
 
 **Input data:**
 
-| *Required format:* raw counts scRNAseq data without feature selection as .loom or anndata file.
+| *Required format:* raw counts scRNAseq data without feature selection as .loom, .h5ad, or .zarr file.
 | *Required row (gene) attribute:* "ensembl_id"; Ensembl ID for each gene.
 | *Required col (cell) attribute:* "n_counts"; total read counts in that cell.
 
@@ -20,9 +20,9 @@ Geneformer tokenizer.
     
 **Description:**
 
-| Input data is a directory with .loom or .h5ad files containing raw counts from single cell RNAseq data, including all genes detected in the transcriptome without feature selection. The input file type is specified by the argument file_format in the tokenize_data function.
+| Input data is a directory with .loom, .h5ad, or .zarr files containing raw counts from single cell RNAseq data, including all genes detected in the transcriptome without feature selection. The input file type is specified by the argument file_format in the tokenize_data function.
 
-| The discussion below references the .loom file format, but the analagous labels are required for .h5ad files, just that they will be column instead of row attributes and vice versa due to the transposed format of the two file types.
+| The discussion below references the .loom file format, but the analagous labels are required for .h5ad and .zarr files, just that they will be column instead of row attributes and vice versa due to the transposed format of the file types.
 
 | Genes should be labeled with Ensembl IDs (loom row attribute "ensembl_id"), which provide a unique identifer for conversion to tokens. Other forms of gene annotations (e.g. gene names) can be converted to Ensembl IDs via Ensembl Biomart. Cells should be labeled with the total read count in the cell (loom column attribute "n_counts") to be used for normalization.
 
@@ -30,7 +30,7 @@ Geneformer tokenizer.
 
 | Additionally, if the original .loom file contains a cell column attribute called "filter_pass", this column will be used as a binary indicator of whether to include these cells in the tokenized data. All cells with "1" in this attribute will be tokenized, whereas the others will be excluded. One may use this column to indicate QC filtering or other criteria for selection for inclusion in the final tokenized dataset.
 
-| If one's data is in other formats besides .loom or .h5ad, one can use the relevant tools (such as Anndata tools) to convert the file to a .loom or .h5ad format prior to running the transcriptome tokenizer.
+| If one's data is in other formats besides .loom, .h5ad, or .zarr, one can use the relevant tools (such as Anndata tools) to convert the file to a .loom, .h5ad, or .zarr format prior to running the transcriptome tokenizer.
 
 | OF NOTE: Use model_version to auto-select settings for model version other than current default. For V1 model series (original Geneformer pretrained in 2021 on ~30M cells), one must use correct corresponding token dictionary and gene median file, set special_token to False, and set model_input_size to 2048. This argument enables auto-selection of these settings. (For V2 model series, special_token must be True and model_input_size is 4096.)
 
@@ -46,6 +46,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Literal
 
+import anndata as ad
 import loompy as lp
 import numpy as np
 import pandas as pd
@@ -200,13 +201,16 @@ def sum_ensembl_ids(
                             dsout.add_columns(processed_array, col_attrs=view.ca)
                 return dedup_filename
 
-    elif file_format == "h5ad":
+    elif file_format in ["h5ad", "zarr"]:
         """
         Map Ensembl IDs from gene mapping dictionary. If duplicate Ensembl IDs are found, sum counts together.
         Returns adata object with deduplicated Ensembl IDs.
         """
 
-        data = sc.read_h5ad(str(data_directory))
+        if file_format == "h5ad":
+            data = sc.read_h5ad(str(data_directory))
+        else:  # zarr
+            data = ad.read_zarr(str(data_directory))
 
         if use_h5ad_index:
             data.var["ensembl_id"] = list(data.var.index)
@@ -236,7 +240,7 @@ def sum_ensembl_ids(
                 gene for gene in ensembl_ids if gene in gene_token_dict.keys()
             ]
             if len(ensembl_id_check) == len(set(ensembl_id_check)):
-                return data_directory
+                return data
             else:
                 raise ValueError("Error: data Ensembl IDs non-unique.")
 
@@ -435,7 +439,7 @@ class TranscriptomeTokenizer:
         data_directory: Path | str,
         output_directory: Path | str,
         output_prefix: str,
-        file_format: Literal["loom", "h5ad"] = "loom",
+        file_format: Literal["loom", "h5ad", "zarr"] = "loom",
         input_identifier: str = "",
         use_generator: bool = False,
     ):
@@ -451,9 +455,9 @@ class TranscriptomeTokenizer:
         output_prefix : str
             | Prefix for output .dataset
         file_format : str
-            | Format of input files. Can be "loom" or "h5ad".
+            | Format of input files. Can be "loom", "h5ad", or "zarr".
         input_identifier : str
-            | Substring identifier for input .loom or .h5ad, only matches are tokenized
+            | Substring identifier for input .loom, .h5ad, or .zarr, only matches are tokenized
             | Default is no identifier, tokenizes all files in provided directory.
         use_generator : bool
             | Whether to use generator or dict for tokenization.
@@ -473,7 +477,7 @@ class TranscriptomeTokenizer:
         tokenized_dataset.save_to_disk(str(output_path))
 
     def tokenize_files(
-        self, data_directory, file_format: Literal["loom", "h5ad"] = "loom", input_identifier: str = ""
+        self, data_directory, file_format: Literal["loom", "h5ad", "zarr"] = "loom", input_identifier: str = ""
     ):
         tokenized_cells = []
         tokenized_counts = []
@@ -485,7 +489,7 @@ class TranscriptomeTokenizer:
 
         # loops through directories to tokenize .loom files
         file_found = 0
-        # loops through directories to tokenize .loom or .h5ad files
+        # loops through directories to tokenize .loom, .h5ad, or .zarr files
         tokenize_file_fn = (
             self.tokenize_loom if file_format == "loom" else self.tokenize_anndata
         )
@@ -496,7 +500,7 @@ class TranscriptomeTokenizer:
         for file_path in data_directory.glob(file_match):
             file_found = 1
             print(f"Tokenizing {file_path}")
-            file_tokenized_cells, file_cell_metadata, file_tokenized_counts = tokenize_file_fn(file_path)
+            file_tokenized_cells, file_cell_metadata, file_tokenized_counts = tokenize_file_fn(file_path, file_format=file_format)
             tokenized_cells += file_tokenized_cells
             tokenized_counts += file_tokenized_counts
             if self.custom_attr_name_dict is not None:
@@ -514,7 +518,7 @@ class TranscriptomeTokenizer:
             raise
         return tokenized_cells, cell_metadata, tokenized_counts
 
-    def tokenize_anndata(self, adata_file_path, target_sum=10_000):
+    def tokenize_anndata(self, adata_file_path, target_sum=10_000, file_format="h5ad"):
         adata = sum_ensembl_ids(
             adata_file_path,
             self.collapse_gene_ids,
@@ -522,7 +526,7 @@ class TranscriptomeTokenizer:
             self.gene_token_dict,
             self.custom_attr_name_dict,
             self.use_h5ad_index,
-            file_format="h5ad",
+            file_format=file_format,
             chunk_size=self.chunk_size,
         )
 
@@ -612,7 +616,7 @@ class TranscriptomeTokenizer:
         
         return tokenized_cells, file_cell_metadata, tokenized_counts
 
-    def tokenize_loom(self, loom_file_path, target_sum=10_000):
+    def tokenize_loom(self, loom_file_path, target_sum=10_000, file_format="loom"):
         if self.custom_attr_name_dict is not None:
             file_cell_metadata = {
                 attr_key: [] for attr_key in self.custom_attr_name_dict.keys()
@@ -627,7 +631,7 @@ class TranscriptomeTokenizer:
             self.gene_token_dict,
             self.custom_attr_name_dict,
             use_h5ad_index=False,
-            file_format="loom",
+            file_format=file_format,
             chunk_size=self.chunk_size,
         )
 
