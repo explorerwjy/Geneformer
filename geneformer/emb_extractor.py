@@ -837,14 +837,14 @@ class EmbExtractor:
             raise
 
         if max_ncells_to_plot is not None:
-            if max_ncells_to_plot > self.max_ncells:
-                max_ncells_to_plot = self.max_ncells
-                logger.warning(
-                    "max_ncells_to_plot must be <= max_ncells. "
-                    f"Changing max_ncells_to_plot to {self.max_ncells}."
-                )
-            elif max_ncells_to_plot < self.max_ncells:
-                embs = embs.sample(max_ncells_to_plot, axis=0)
+            if self.max_ncells is not None:
+                if max_ncells_to_plot > self.max_ncells:
+                    max_ncells_to_plot = self.max_ncells
+                    logger.warning(
+                        "max_ncells_to_plot must be <= max_ncells. "
+                        f"Changing max_ncells_to_plot to {self.max_ncells}."
+                    )
+            embs = embs.sample(max_ncells_to_plot, axis=0)
 
         if self.emb_label is None:
             label_len = 0
