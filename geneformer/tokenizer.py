@@ -617,6 +617,8 @@ class TranscriptomeTokenizer:
         return tokenized_cells, file_cell_metadata, tokenized_counts
 
     def tokenize_loom(self, loom_file_path, target_sum=10_000, file_format="loom"):
+        tokenized_counts = []  # keep_counts not implemented for tokenize_loom
+        
         if self.custom_attr_name_dict is not None:
             file_cell_metadata = {
                 attr_key: [] for attr_key in self.custom_attr_name_dict.keys()
@@ -704,7 +706,7 @@ class TranscriptomeTokenizer:
                 del data.ra["ensembl_id_collapsed"]
 
 
-        return tokenized_cells, file_cell_metadata
+        return tokenized_cells, file_cell_metadata, tokenized_counts
 
     def create_dataset(
         self,
