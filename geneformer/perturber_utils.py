@@ -508,6 +508,11 @@ def make_perturbation_batch(
 def make_perturbation_batch_special(
     example_cell, perturb_type, tokens_to_perturb, anchor_token, combo_lvl, num_proc
 ) -> tuple[Dataset, List[int]]:
+
+    # For datasets>=4.0.0, convert to dict to avoid format issues
+    if int(datasets.__version__.split(".")[0]) >= 4:
+        example_cell = example_cell[:]
+
     if combo_lvl == 0 and tokens_to_perturb == "all":
         if perturb_type in ["overexpress", "activate"]:
             range_start = 1
