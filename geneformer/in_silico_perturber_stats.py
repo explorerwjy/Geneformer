@@ -726,6 +726,9 @@ class InSilicoPerturberStats:
             |               "start_state": "dcm",
             |               "goal_state": "nf",
             |               "alt_states": ["hcm", "other1", "other2"]}
+        pickle_suffix : None, str
+            | Suffix to subselect intermediate raw files for analysis.
+            | Default output of InSilicoPerturber uses suffix "_raw.pickle".
         model_version : str
             | To auto-select settings for model version other than current default.
             | Current options: V1: models pretrained on ~30M cells, V2: models pretrained on ~104M cells
