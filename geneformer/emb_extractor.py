@@ -42,6 +42,8 @@ def get_embs(
     special_token=False,
     summary_stat=None,
     silent=False,
+    save_tdigest=False,
+    tdigest_path=None,
 ):
     model_input_size = pu.get_model_input_size(model)
     total_batch_length = len(filtered_input_data)
@@ -180,12 +182,18 @@ def get_embs(
     # calculate summary stat embs from approximated tdigests
     elif summary_stat is not None:
         if emb_mode == "cell":
+            if save_tdigest:
+                with open(f"{tdigest_path}","wb") as fp:
+                    pickle.dump(embs_tdigests, fp)
             if summary_stat == "mean":
                 summary_emb_list = tdigest_mean(embs_tdigests, emb_dims)
             elif summary_stat == "median":
                 summary_emb_list = tdigest_median(embs_tdigests, emb_dims)
             embs_stack = torch.tensor(summary_emb_list)
         elif emb_mode == "gene":
+            if save_tdigest:
+                with open(f"{tdigest_path}","wb") as fp:
+                    pickle.dump(embs_tdigests_dict, fp)
             if summary_stat == "mean":
                 [
                     update_tdigest_dict_mean(embs_tdigests_dict, gene, emb_dims)
@@ -252,7 +260,7 @@ def label_cell_embs(embs, downsampled_data, emb_labels):
     return embs_df
 
 
-def label_gene_embs(embs, downsampled_data, token_gene_dict):
+def label_gene_embs(embs, downsampled_data, token_gene_dict, gene_emb_style="mean_pool"):
     gene_set = {
         element for sublist in downsampled_data["input_ids"] for element in sublist
     }
@@ -267,16 +275,39 @@ def label_gene_embs(embs, downsampled_data, token_gene_dict):
         )
         for k in dict_i.keys():
             gene_emb_dict[k].append(dict_i[k])
-    for k in gene_emb_dict.keys():
-        gene_emb_dict[k] = (
-            torch.squeeze(torch.mean(torch.stack(gene_emb_dict[k]), dim=0), dim=0)
-            .cpu()
-            .numpy()
-        )
-    embs_df = pd.DataFrame(gene_emb_dict).T
+    if gene_emb_style != "all":
+        for k in gene_emb_dict.keys():
+            gene_emb_dict[k] = (
+                torch.squeeze(torch.mean(torch.stack(gene_emb_dict[k]), dim=0), dim=0)
+                .cpu()
+                .numpy()
+            )
+        embs_df = pd.DataFrame(gene_emb_dict).T
+    else:
+        embs_df = dict_lol_to_df(gene_emb_dict)
     embs_df.index = [token_gene_dict[token] for token in embs_df.index]
     return embs_df
 
+def dict_lol_to_df(data_dict):
+    # save dictionary with values being list of equal-length lists as dataframe
+    df_data = []
+    for key, list_of_lists in data_dict.items():
+        for i, sublist in enumerate(list_of_lists):
+            row_data = [key, i] + sublist.tolist()
+            df_data.append(row_data)
+    
+    # determine column names based on the length of sublists
+    # assuming all sublists have the same length
+    num_columns_from_sublist = len(list(data_dict.values())[0][0])
+    column_names = ['Gene', 'Identifier'] + [f'{j}' for j in range(num_columns_from_sublist)]
+    
+    # create the dataframe
+    df = pd.DataFrame(df_data, columns=column_names)
+    
+    # set 'Gene' as the index
+    df = df.set_index('Gene')
+    
+    return df
 
 def plot_umap(embs_df, emb_dims, labels_clean, output_prefix, output_directory, kwargs_dict, seed=0):
     only_embs_df = embs_df.iloc[:, :emb_dims]
@@ -404,7 +435,7 @@ class EmbExtractor:
         "num_classes": {int},
         "emb_mode": {"cls", "cell", "gene"},
         "cell_emb_style": {"mean_pool"},
-        "gene_emb_style": {"mean_pool"},
+        "gene_emb_style": {"mean_pool", "all"},
         "filter_data": {None, dict},
         "max_ncells": {None, int},
         "emb_layer": {-1, 0},
@@ -432,6 +463,7 @@ class EmbExtractor:
         forward_batch_size=100,
         nproc=4,
         summary_stat=None,
+        save_tdigest=False,
         model_version="V2",
         token_dictionary_file=None,
     ):
@@ -451,9 +483,9 @@ class EmbExtractor:
         cell_emb_style : {"mean_pool"}
             | Method for summarizing cell embeddings if not using CLS token.
             | Currently only option is mean pooling of gene embeddings for given cell.
-        gene_emb_style : "mean_pool"
+        gene_emb_style : {"mean_pool", "all}
             | Method for summarizing gene embeddings.
-            | Currently only option is mean pooling of contextual gene embeddings for given gene.
+            | Currently only option is returning all or mean pooling of contextual gene embeddings for given gene.
         filter_data : None, dict
             | Default is to extract embeddings from all input data.
             | Otherwise, dictionary specifying .dataset column name and list of values to filter by.
@@ -483,6 +515,9 @@ class EmbExtractor:
             | If mean or median, outputs only approximated mean or median embedding of input data.
             | Non-exact recommended if encountering memory constraints while generating goal embedding positions.
             | Non-exact is slower but more memory-efficient.
+        save_tdigest : bool
+            | Whether to save a dictionary of tdigests for each gene and embedding dimension
+            | Only applies when summary_stat is not None
         model_version : str
             | To auto-select settings for model version other than current default.
             | Current options: V1: models pretrained on ~30M cells, V2: models pretrained on ~104M cells
@@ -526,8 +561,15 @@ class EmbExtractor:
         else:
             self.summary_stat = summary_stat
             self.exact_summary_stat = None
+        self.save_tdigest = save_tdigest
 
         self.validate_options()
+
+        if (summary_stat is None) and (save_tdigest is True):
+            logger.warning(
+                    "tdigests will not be saved since summary_stat is None."
+                )
+            save_tdigest = False
 
         if self.model_version == "V1":
             from . import TOKEN_DICTIONARY_FILE_30M
@@ -635,6 +677,10 @@ class EmbExtractor:
             self.model_type, self.num_classes, model_directory, mode="eval"
         )
         layer_to_quant = pu.quant_layers(model) + self.emb_layer
+        if self.save_tdigest:
+            tdigest_path = (Path(output_directory) / f"{output_prefix}_tdigest").with_suffix(".pkl")
+        else:
+            tdigest_path = None
         embs = get_embs(
             model=model,
             filtered_input_data=downsampled_data,
@@ -644,6 +690,8 @@ class EmbExtractor:
             forward_batch_size=self.forward_batch_size,
             token_gene_dict=self.token_gene_dict,
             summary_stat=self.summary_stat,
+            save_tdigest=self.save_tdigest,
+            tdigest_path=tdigest_path,
         )
 
         if self.emb_mode == "cell":
@@ -653,7 +701,7 @@ class EmbExtractor:
                 embs_df = pd.DataFrame(embs.cpu().numpy()).T
         elif self.emb_mode == "gene":
             if self.summary_stat is None:
-                embs_df = label_gene_embs(embs, downsampled_data, self.token_gene_dict)
+                embs_df = label_gene_embs(embs, downsampled_data, self.token_gene_dict, self.gene_emb_style)
             elif self.summary_stat is not None:
                 embs_df = pd.DataFrame(embs).T
                 embs_df.index = [self.token_gene_dict[token] for token in embs_df.index]
