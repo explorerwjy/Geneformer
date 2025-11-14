@@ -77,7 +77,7 @@ def py_softmax(vector):
     return e / e.sum()
 
 
-def classifier_predict(model, classifier_type, evalset, forward_batch_size, gene_token_dict):
+def classifier_predict(model, classifier_type, evalset, forward_batch_size, gene_token_dict, predict_metadata=None):
     if classifier_type == "gene":
         label_name = "labels"
     elif classifier_type == "cell":
@@ -85,6 +85,14 @@ def classifier_predict(model, classifier_type, evalset, forward_batch_size, gene
 
     predict_logits = []
     predict_labels = []
+
+    predict_metadata_all = None
+    
+    if predict_metadata is not None:
+        predict_metadata_all = dict()
+        for metadata_name in predict_metadata:
+            predict_metadata_all[metadata_name] = []
+    
     model.eval()
 
     # ensure there is at least 2 examples in each batch to avoid incorrect tensor dims
@@ -99,9 +107,15 @@ def classifier_predict(model, classifier_type, evalset, forward_batch_size, gene
     for i in trange(0, evalset_len, forward_batch_size):
         max_range = min(i + forward_batch_size, evalset_len)
         batch_evalset = evalset.select([i for i in range(i, max_range)])
+
+        if predict_metadata is not None:
+            for metadata_name in predict_metadata:
+                predict_metadata_all[metadata_name] += batch_evalset[metadata_name]
+        
         padded_batch = preprocess_classifier_batch(
             batch_evalset, max_evalset_len, label_name, gene_token_dict
         )
+            
         padded_batch.set_format(type="torch")
 
         # For datasets>=4.0.0, convert to dict to avoid format issues
@@ -134,7 +148,8 @@ def classifier_predict(model, classifier_type, evalset, forward_batch_size, gene
     y_pred = [vote(item[0]) for item in logit_label_paired]
     y_true = [item[1] for item in logit_label_paired]
     logits_list = [item[0] for item in logit_label_paired]
-    return y_pred, y_true, logits_list
+
+    return y_pred, y_true, logits_list, predict_metadata_all
 
 
 def get_metrics(y_pred, y_true, logits_list, num_classes, labels):

@@ -570,6 +570,27 @@ def compute_metrics(pred):
     return {"accuracy": acc, "macro_f1": macro_f1}
 
 
+def robust_compute_objective(metrics: dict):
+    # tries both prefixed ("eval_") and raw metric names to support different transformers versions
+    metric_name = "macro_f1"
+    
+    # check for the prefixed version
+    prefixed_metric_name = f"eval_{metric_name}"
+    if prefixed_metric_name in metrics:
+        return metrics[prefixed_metric_name]
+    
+    # fall back to the raw name
+    elif metric_name in metrics:
+        return metrics[metric_name]
+    
+    # if neither is found, raise a clear error to help with debugging
+    raise KeyError(
+        f"Could not find '{prefixed_metric_name}' or '{metric_name}' in the reported metrics. "
+        f"Please check your `compute_metrics` function and `TrainingArguments`. "
+        f"Available metrics: {list(metrics.keys())}"
+    )
+
+
 def get_default_train_args(model, classifier, data, output_dir):
     num_layers = pu.quant_layers(model)
     freeze_layers = 0

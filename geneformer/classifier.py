@@ -801,7 +801,7 @@ class Classifier:
                     # 5-fold cross-validate
                     num_cells = len(data)
                     fifth_cells = int(np.floor(num_cells * 0.2))
-                    num_eval = min((self.eval_size * num_cells), fifth_cells)
+                    num_eval = int(min((self.eval_size * num_cells), fifth_cells))
                     start = i * fifth_cells
                     end = start + num_eval
                     eval_indices = [j for j in range(start, end)]
@@ -1313,6 +1313,7 @@ class Classifier:
         predict=False,
         output_directory=None,
         output_prefix=None,
+        predict_metadata=None,
     ):
         """
         Evaluate the fine-tuned model.
@@ -1338,9 +1339,11 @@ class Classifier:
 
         ##### Evaluate the model #####
         labels = id_class_dict.keys()
-        y_pred, y_true, logits_list = eu.classifier_predict(
-            model, self.classifier, eval_data, self.forward_batch_size, self.gene_token_dict
+
+        y_pred, y_true, logits_list, predict_metadata_all = eu.classifier_predict(
+            model, self.classifier, eval_data, self.forward_batch_size, self.gene_token_dict, predict_metadata
         )
+
         conf_mat, macro_f1, acc, roc_metrics = eu.get_metrics(
             y_pred, y_true, logits_list, num_classes, labels
         )
@@ -1350,6 +1353,9 @@ class Classifier:
                 "label_ids": y_true,
                 "predictions": logits_list,
             }
+            if predict_metadata is not None:
+                pred_dict["prediction_metadata"] = predict_metadata_all
+                
             pred_dict_output_path = (
                 Path(output_directory) / f"{output_prefix}_pred_dict"
             ).with_suffix(".pkl")
@@ -1370,6 +1376,7 @@ class Classifier:
         output_directory,
         output_prefix,
         predict=True,
+        predict_metadata=None,
     ):
         """
         Evaluate the fine-tuned model.
@@ -1389,6 +1396,8 @@ class Classifier:
             | Prefix for output files
         predict : bool
             | Whether or not to save eval predictions
+        predict_metadata : None | list
+            | Metadata labels to output with predictions (columns in test_data_file)
         """
 
         # load numerical id to class dictionary (id:class)
@@ -1401,6 +1410,15 @@ class Classifier:
         # load previously filtered and prepared data
         test_data = pu.load_and_filter(None, self.nproc, test_data_file)
 
+        if predict_metadata is not None:
+            absent_metadata = []
+            for predict_metadata_x in predict_metadata:
+                if predict_metadata_x not in test_data.features.keys():
+                    absent_metadata += [predict_metadata_x]
+            if len(absent_metadata)>0:
+                logger.error(f"Following predict_metadata was not found as column in test_data_file: {absent_metadata}")
+                raise
+                    
         # load previously fine-tuned model
         model = pu.load_model(
             self.model_type,
@@ -1419,6 +1437,7 @@ class Classifier:
             predict=predict,
             output_directory=output_directory,
             output_prefix=output_prefix,
+            predict_metadata=predict_metadata,
         )
 
         all_conf_mat_df = pd.DataFrame(
