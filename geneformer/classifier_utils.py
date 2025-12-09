@@ -94,7 +94,7 @@ def remove_rare(data, rare_threshold, label, nproc):
     return data
 
 
-def label_classes(classifier, data, gene_class_dict, nproc, id_class_dict):
+def label_classes(classifier, data, gene_class_dict, nproc, id_class_dict=None):
     if classifier == "cell":
         label_set = set(data["label"])
     elif classifier == "gene":
