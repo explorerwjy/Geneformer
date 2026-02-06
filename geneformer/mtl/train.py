@@ -475,14 +475,26 @@ def objective(
                 param_name, param_config["low"], param_config["high"]
             )
     
-    # Set appropriate max layers to freeze based on pretrained model
+    # Set appropriate max layers to freeze based on pretrained model or user-specific range
     if "max_layers_to_freeze" in trial_config:
-        freeze_range = get_layer_freeze_range(trial_config["pretrained_path"])
-        trial_config["max_layers_to_freeze"] = int(trial.suggest_int(
-            "max_layers_to_freeze", 
-            freeze_range["min"], 
-            freeze_range["max"]
-        ))
+        if trial_config["max_layers_to_freeze"] is None:
+        # infer range from pretrained model
+            freeze_range = get_layer_freeze_range(trial_config["pretrained_path"])
+            trial_config["max_layers_to_freeze"] = int(
+                trial.suggest_int(
+                    "max_layers_to_freeze",
+                    freeze_range["min"],
+                    freeze_range["max"],
+                )
+        )
+        else:
+        # user-specified range
+            min_freeze = trial_config["max_layers_to_freeze"]["min"]
+            max_freeze = trial_config["max_layers_to_freeze"]["max"]
+
+            trial_config["max_layers_to_freeze"] = int(
+                trial.suggest_int("max_layers_to_freeze", min_freeze, max_freeze)
+            )
 
     trial_config["run_name"] = f"trial_{trial.number}"
     
