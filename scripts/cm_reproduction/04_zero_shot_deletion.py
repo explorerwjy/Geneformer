@@ -22,6 +22,8 @@ import logging
 import pickle
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -60,7 +62,7 @@ print(f"Control genes: {len(control_genes)}")
 # === Configuration ===
 # Set MAX_NCELLS to a small number for smoke testing, or 2000 for full run
 MAX_NCELLS = 2000  # Set to 50 for quick test, 2000 for full run
-FORWARD_BATCH_SIZE = 200
+FORWARD_BATCH_SIZE = 25  # reduced from 200 to avoid OOM on 316M model
 
 # %% [markdown]
 # ## Step 1: Run in silico perturbation (delete each gene individually)
@@ -79,7 +81,7 @@ isp = InSilicoPerturber(
     emb_layer=-1,
     forward_batch_size=FORWARD_BATCH_SIZE,
     model_version="V2",
-    nproc=10,
+    nproc=1,  # use 1 to avoid multiprocessing spawn issues
 )
 
 isp.perturb_data(

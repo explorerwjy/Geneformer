@@ -88,7 +88,8 @@ print(f"Using fine-tuned model: {FINETUNED_MODEL}")
 # %%
 # Configuration shared between DCM->NF and HCM->NF analyses
 MAX_NCELLS = 2000  # Set to 50 for quick testing, 2000 for full run
-FORWARD_BATCH_SIZE = 100
+FORWARD_BATCH_SIZE = 50  # CellClassifier model uses more VRAM than pretrained
+EMB_BATCH_SIZE = 50  # EmbExtractor uses classifier model (more VRAM than pretrained)
 
 # Cell states dictionaries for the two directions
 dcm_states = {
@@ -114,11 +115,11 @@ embex = EmbExtractor(
     max_ncells=MAX_NCELLS,
     emb_layer=0,
     summary_stat="exact_mean",
-    forward_batch_size=FORWARD_BATCH_SIZE,
+    forward_batch_size=EMB_BATCH_SIZE,
     emb_mode="cls",
     cell_emb_style="mean_pool",
     model_version="V2",
-    nproc=10,
+    nproc=1,  # use 1 to avoid multiprocessing spawn issues
 )
 
 # Extract state embeddings (same for both directions since we model all 3 states)
@@ -144,7 +145,7 @@ print("=" * 60)
 
 isp_dcm = InSilicoPerturber(
     perturb_type="delete",
-    genes_to_perturb=cardiac_tfs,
+    genes_to_perturb="all",
     combos=0,
     model_type="CellClassifier",
     num_classes=3,
@@ -157,7 +158,7 @@ isp_dcm = InSilicoPerturber(
     emb_layer=0,
     forward_batch_size=FORWARD_BATCH_SIZE,
     model_version="V2",
-    nproc=10,
+    nproc=1,  # use 1 to avoid multiprocessing spawn issues
 )
 
 isp_dcm.perturb_data(
@@ -177,7 +178,7 @@ print("=" * 60)
 
 isp_hcm = InSilicoPerturber(
     perturb_type="delete",
-    genes_to_perturb=cardiac_tfs,
+    genes_to_perturb="all",
     combos=0,
     model_type="CellClassifier",
     num_classes=3,
@@ -190,7 +191,7 @@ isp_hcm = InSilicoPerturber(
     emb_layer=0,
     forward_batch_size=FORWARD_BATCH_SIZE,
     model_version="V2",
-    nproc=10,
+    nproc=1,  # use 1 to avoid multiprocessing spawn issues
 )
 
 isp_hcm.perturb_data(

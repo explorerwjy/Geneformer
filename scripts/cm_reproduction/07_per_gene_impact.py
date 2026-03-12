@@ -3,126 +3,112 @@
 # %autoreload 2
 
 # %% [markdown]
-# # Per-Gene Impact Extraction (Phase 2D)
+# # Phase 2D: Per-Gene Ion Channel Impact Extraction
 #
-# Uses `emb_mode="cls_and_gene"` to measure how deleting top therapeutic TFs
-# (from Phase 2C) affects individual gene embeddings, specifically focusing on
-# ion channel genes.
+# For top TFs from Phase 2C, re-run perturbation with emb_mode="cell_and_gene"
+# to get per-gene embedding shifts. Filter for ion channel genes to prepare
+# for openCARP integration.
 #
-# ## Approach
-# 1. Load top TFs identified in Phase 2C.
-# 2. Re-run InSilicoPerturber with `emb_mode="cls_and_gene"` to capture
-#    both cell-level and gene-level embedding shifts.
-# 3. Extract shifts for ion channel genes specifically.
-# 4. Build a TF x ion channel shift matrix and save as CSV.
+# Output: TF x ion_channel matrix of embedding shifts, showing how each
+# therapeutic TF affects each ion channel gene's representation.
 
 # %%
 import glob
 import logging
 import os
 import pickle
-import sys
+from collections import defaultdict
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from geneformer import EmbExtractor, InSilicoPerturber, InSilicoPerturberStats
+from geneformer import EmbExtractor, InSilicoPerturber
+from geneformer import ENSEMBL_DICTIONARY_FILE, TOKEN_DICTIONARY_FILE
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # %%
 # === Paths ===
 BASE_DIR = Path("/home/jw3514/Work/Geneformer/Geneformer")
-MODEL_DIR = BASE_DIR / "models" / "Geneformer" / "Geneformer-V2-316M"
+MODEL_DIR = BASE_DIR / "models" / "Geneformer" / "Geneformer-V2-104M"
 INPUT_DATA = BASE_DIR / "data" / "tokenized" / "chaffin_cardiomyocytes.dataset"
 GENE_LIST_DIR = BASE_DIR / "data" / "gene_lists"
 
-# Phase 2C outputs
-TREATMENT_DIR = BASE_DIR / "outputs" / "cm_reproduction" / "treatment_analysis"
-STATE_EMBS_DIR = TREATMENT_DIR / "state_embs"
-STATS_DIR = TREATMENT_DIR / "stats"
+# Phase 2C outputs (reuse classifier and state embeddings)
+PHASE2C_DIR = BASE_DIR / "outputs" / "cm_reproduction" / "treatment_104M"
+CLASSIFIER_DIR = PHASE2C_DIR / "classifier"
+STATE_EMBS_DIR = PHASE2C_DIR / "state_embs"
 
-# Phase 2D outputs
+# Phase 2D output
 OUTPUT_DIR = BASE_DIR / "outputs" / "cm_reproduction" / "per_gene_impact"
-ISP_OUTPUT_DIR_DCM = OUTPUT_DIR / "isp_dcm_gene"
-ISP_OUTPUT_DIR_HCM = OUTPUT_DIR / "isp_hcm_gene"
-GENE_STATS_DIR = OUTPUT_DIR / "gene_stats"
-
-for d in [ISP_OUTPUT_DIR_DCM, ISP_OUTPUT_DIR_HCM, GENE_STATS_DIR]:
+ISP_OUTPUT_DIR = OUTPUT_DIR / "isp_gene_level"
+STATS_DIR = OUTPUT_DIR / "stats"
+for d in [OUTPUT_DIR, ISP_OUTPUT_DIR, STATS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
+# Batch sizes (cell_and_gene mode uses more VRAM)
+FORWARD_BATCH_SIZE = 20
+MAX_NCELLS = 500
+
 # %%
-# === Load gene lists ===
-with open(GENE_LIST_DIR / "cardiac_tfs.pkl", "rb") as f:
-    cardiac_tfs = pickle.load(f)
+# === Load gene dictionaries ===
+with open(TOKEN_DICTIONARY_FILE, "rb") as f:
+    token_dict = pickle.load(f)
+token_to_ens = {v: k for k, v in token_dict.items()}
 
-with open(GENE_LIST_DIR / "ion_channel_genes.pkl", "rb") as f:
-    ion_channel_genes = pickle.load(f)
-
-print(f"Cardiac TFs: {len(cardiac_tfs)}")
-print(f"Ion channel genes: {len(ion_channel_genes)}")
+with open(ENSEMBL_DICTIONARY_FILE, "rb") as f:
+    ens_dict = pickle.load(f)
+ens_to_name = {v: k for k, v in ens_dict.items()}
 
 # %%
 # === Load top TFs from Phase 2C ===
-top_tfs_dcm_file = STATS_DIR / "top_tfs_dcm_to_nf.pkl"
-top_tfs_hcm_file = STATS_DIR / "top_tfs_hcm_to_nf.pkl"
+with open(PHASE2C_DIR / "stats" / "top_tfs_combined.pkl", "rb") as f:
+    top_tf_tokens = pickle.load(f)
+print(f"Top TFs from Phase 2C: {len(top_tf_tokens)}")
+for t in top_tf_tokens:
+    ens = token_to_ens.get(t, "?")
+    name = ens_to_name.get(ens, "?")
+    print(f"  {t} -> {name} ({ens})")
 
-if not top_tfs_dcm_file.exists() or not top_tfs_hcm_file.exists():
-    print("=" * 60)
-    print("ERROR: Top TF files from Phase 2C not found.")
-    print(f"Expected: {top_tfs_dcm_file}")
-    print(f"Expected: {top_tfs_hcm_file}")
-    print("Please run script 06_treatment_analysis.py first.")
-    print("=" * 60)
-    sys.exit(1)
-
-with open(top_tfs_dcm_file, "rb") as f:
-    top_tfs_dcm = pickle.load(f)
-
-with open(top_tfs_hcm_file, "rb") as f:
-    top_tfs_hcm = pickle.load(f)
-
-print(f"Top DCM->NF TFs: {len(top_tfs_dcm)}")
-print(f"Top HCM->NF TFs: {len(top_tfs_hcm)}")
+# === Load ion channel genes ===
+with open(GENE_LIST_DIR / "ion_channel_genes.pkl", "rb") as f:
+    ion_channel_ensembls = pickle.load(f)
+ion_channel_tokens = set()
+for ens in ion_channel_ensembls:
+    if ens in token_dict:
+        ion_channel_tokens.add(token_dict[ens])
+print(f"\nIon channel genes: {len(ion_channel_ensembls)} "
+      f"({len(ion_channel_tokens)} with tokens)")
+for ens in ion_channel_ensembls:
+    name = ens_to_name.get(ens, "?")
+    tid = token_dict.get(ens, "?")
+    print(f"  {name} ({ens}) -> token {tid}")
 
 # %%
-# === Load state embeddings from Phase 2C ===
+# === Load fine-tuned classifier (from Phase 2C) ===
+model_candidates = sorted(
+    glob.glob(str(CLASSIFIER_DIR / "*cellClassifier*" / "ksplit1"))
+)
+if not model_candidates:
+    raise FileNotFoundError("No fine-tuned classifier found from Phase 2C")
+FINETUNED_MODEL = model_candidates[-1]
+print(f"\nUsing classifier: {FINETUNED_MODEL}")
+
+# === Load state embeddings (from Phase 2C) ===
 state_embs_file = STATE_EMBS_DIR / "disease_state_embs.pkl"
 if not state_embs_file.exists():
-    print("=" * 60)
-    print("ERROR: State embeddings not found.")
-    print(f"Expected: {state_embs_file}")
-    print("Please run script 06_treatment_analysis.py first.")
-    print("=" * 60)
-    sys.exit(1)
-
+    raise FileNotFoundError("No state embeddings found from Phase 2C")
 with open(state_embs_file, "rb") as f:
     state_embs_dict = pickle.load(f)
-
-print(f"State embeddings loaded for: {list(state_embs_dict.keys())}")
-
-# %%
-# === Find fine-tuned classifier model ===
-CLASSIFIER_BASE = BASE_DIR / "outputs" / "disease_classification"
-model_candidates = sorted(glob.glob(str(CLASSIFIER_BASE / "*" / "*cellClassifier*" / "ksplit1")))
-
-if not model_candidates:
-    print("=" * 60)
-    print("ERROR: No fine-tuned classifier model found.")
-    print("Please run script 05_disease_classification.py first.")
-    print("=" * 60)
-    sys.exit(1)
-
-FINETUNED_MODEL = model_candidates[-1]
-print(f"Using fine-tuned model: {FINETUNED_MODEL}")
+print(f"State embeddings: {list(state_embs_dict.keys())}")
 
 # %%
-# === Configuration ===
-MAX_NCELLS = 2000  # Set to 50 for quick testing, 2000 for full run
-FORWARD_BATCH_SIZE = 100
-
+# === Cell state definitions ===
 dcm_states = {
     "state_key": "disease",
     "start_state": "DCM",
@@ -130,202 +116,185 @@ dcm_states = {
     "alt_states": ["HCM"],
 }
 
-hcm_states = {
-    "state_key": "disease",
-    "start_state": "HCM",
-    "goal_state": "NF",
-    "alt_states": ["DCM"],
-}
+# %% [markdown]
+# ## Per-gene perturbation (cell_and_gene mode)
+#
+# For each top TF, delete it in DCM cells and capture per-gene embedding shifts.
+# This tells us how each gene's learned representation changes when the TF is removed.
+# We then extract ion channel genes to understand TF -> ion channel relationships.
+
+# %%
+print("=" * 60)
+print(f"ISP: Per-gene impact for {len(top_tf_tokens)} top TFs")
+print(f"Mode: cls_and_gene (gene-level embedding shifts)")
+print("=" * 60)
+
+for i, tf_token in enumerate(top_tf_tokens):
+    tf_ens = token_to_ens.get(tf_token, "?")
+    tf_name = ens_to_name.get(tf_ens, "?")
+
+    # Skip if output already exists
+    existing = list(ISP_OUTPUT_DIR.glob(
+        f"in_silico_delete_tf_{i:03d}_*gene_embs_dict*_raw.pickle"
+    ))
+    if existing:
+        print(f"--- TF {i+1}/{len(top_tf_tokens)}: {tf_name} --- SKIPPED (output exists)")
+        continue
+
+    print(f"\n--- TF {i+1}/{len(top_tf_tokens)}: {tf_name} ({tf_ens}) ---")
+
+    isp = InSilicoPerturber(
+        perturb_type="delete",
+        genes_to_perturb=[tf_ens],
+        combos=0,
+        model_type="CellClassifier",
+        num_classes=3,
+        emb_mode="cls_and_gene",
+        cell_emb_style="mean_pool",
+        filter_data={"disease": ["DCM"]},
+        cell_states_to_model=dcm_states,
+        state_embs_dict=state_embs_dict,
+        max_ncells=MAX_NCELLS,
+        emb_layer=0,
+        forward_batch_size=FORWARD_BATCH_SIZE,
+        model_version="V2",
+        nproc=1,
+    )
+
+    isp.perturb_data(
+        model_directory=FINETUNED_MODEL,
+        input_data_file=str(INPUT_DATA),
+        output_directory=str(ISP_OUTPUT_DIR),
+        output_prefix=f"tf_{i:03d}",
+    )
+
+print("\nPer-gene ISP complete!")
 
 # %% [markdown]
-# ## Step 1: Per-gene perturbation - DCM to NF (top TFs)
+# ## Extract ion channel shifts from gene-level output
 
 # %%
 print("=" * 60)
-print("Running per-gene perturbation: DCM -> NF (cls_and_gene mode)")
+print("Extracting ion channel gene shifts from gene_embs_dict files")
 print("=" * 60)
 
-isp_dcm_gene = InSilicoPerturber(
-    perturb_type="delete",
-    genes_to_perturb=top_tfs_dcm,
-    combos=0,
-    model_type="CellClassifier",
-    num_classes=3,
-    emb_mode="cls_and_gene",
-    cell_emb_style="mean_pool",
-    filter_data={"disease": ["DCM"]},
-    cell_states_to_model=dcm_states,
-    state_embs_dict=state_embs_dict,
-    max_ncells=MAX_NCELLS,
-    emb_layer=0,
-    forward_batch_size=FORWARD_BATCH_SIZE,
-    model_version="V2",
-    nproc=10,
-)
+gene_embs_files = sorted(ISP_OUTPUT_DIR.glob("*gene_embs_dict*_raw.pickle"))
+print(f"Found {len(gene_embs_files)} gene_embs_dict files")
 
-isp_dcm_gene.perturb_data(
-    model_directory=FINETUNED_MODEL,
-    input_data_file=str(INPUT_DATA),
-    output_directory=str(ISP_OUTPUT_DIR_DCM),
-    output_prefix="dcm_gene",
-)
+results = []
+for gf in gene_embs_files:
+    with open(gf, "rb") as f:
+        gene_embs_dict = pickle.load(f)
 
-# %% [markdown]
-# ## Step 2: Per-gene perturbation - HCM to NF (top TFs)
+    # gene_embs_dict keys: (perturbed_token, affected_gene_token)
+    # values: list of cosine similarities (one per cell)
+    for (perturbed_token, affected_token), cos_sims in gene_embs_dict.items():
+        # Handle both tuple and single token for perturbed
+        if isinstance(perturbed_token, tuple):
+            perturbed_token = perturbed_token[0]
+
+        perturbed_ens = token_to_ens.get(perturbed_token, str(perturbed_token))
+        perturbed_name = ens_to_name.get(perturbed_ens, perturbed_ens)
+
+        affected_ens = token_to_ens.get(affected_token, str(affected_token))
+        affected_name = ens_to_name.get(affected_ens, affected_ens)
+
+        if isinstance(cos_sims, list):
+            mean_shift = np.mean(cos_sims)
+            n_cells = len(cos_sims)
+        else:
+            mean_shift = cos_sims
+            n_cells = 1
+
+        # Check if affected gene is an ion channel
+        is_ion_channel = affected_ens in ion_channel_ensembls
+
+        results.append({
+            "tf_name": perturbed_name,
+            "tf_ensembl": perturbed_ens,
+            "tf_token": perturbed_token,
+            "affected_gene": affected_name,
+            "affected_ensembl": affected_ens,
+            "affected_token": affected_token,
+            "mean_cosine_shift": mean_shift,
+            "n_cells": n_cells,
+            "is_ion_channel": is_ion_channel,
+        })
+
+df_all = pd.DataFrame(results)
+print(f"Total TF x gene entries: {len(df_all)}")
+print(f"Unique TFs: {df_all['tf_name'].nunique()}")
+print(f"Unique affected genes: {df_all['affected_gene'].nunique()}")
+
+# Save full results
+df_all.to_csv(STATS_DIR / "all_gene_shifts.csv", index=False)
 
 # %%
-print("=" * 60)
-print("Running per-gene perturbation: HCM -> NF (cls_and_gene mode)")
-print("=" * 60)
+# === Filter for ion channel genes ===
+df_ic = df_all[df_all["is_ion_channel"]].copy()
+df_ic = df_ic.sort_values("mean_cosine_shift", ascending=True)
 
-isp_hcm_gene = InSilicoPerturber(
-    perturb_type="delete",
-    genes_to_perturb=top_tfs_hcm,
-    combos=0,
-    model_type="CellClassifier",
-    num_classes=3,
-    emb_mode="cls_and_gene",
-    cell_emb_style="mean_pool",
-    filter_data={"disease": ["HCM"]},
-    cell_states_to_model=hcm_states,
-    state_embs_dict=state_embs_dict,
-    max_ncells=MAX_NCELLS,
-    emb_layer=0,
-    forward_batch_size=FORWARD_BATCH_SIZE,
-    model_version="V2",
-    nproc=10,
-)
+print(f"\n{'='*60}")
+print(f"Ion channel gene shifts: {len(df_ic)} entries")
+print(f"TFs with ion channel effects: {df_ic['tf_name'].nunique()}")
+print(f"Ion channels found: {df_ic['affected_gene'].nunique()}")
+print(f"{'='*60}")
 
-isp_hcm_gene.perturb_data(
-    model_directory=FINETUNED_MODEL,
-    input_data_file=str(INPUT_DATA),
-    output_directory=str(ISP_OUTPUT_DIR_HCM),
-    output_prefix="hcm_gene",
-)
+if len(df_ic) > 0:
+    # Save ion channel results
+    df_ic.to_csv(STATS_DIR / "tf_ion_channel_shifts.csv", index=False)
 
-# %% [markdown]
-# ## Step 3: Aggregate gene-level shifts
+    # Create pivot table: TF x ion channel
+    pivot = df_ic.pivot_table(
+        index="tf_name",
+        columns="affected_gene",
+        values="mean_cosine_shift",
+        aggfunc="mean",
+    )
 
-# %%
-print("=" * 60)
-print("Aggregating gene shifts: DCM -> NF")
-print("=" * 60)
+    # Sort by mean absolute shift
+    pivot["mean_abs_shift"] = pivot.abs().mean(axis=1)
+    pivot = pivot.sort_values("mean_abs_shift", ascending=False)
+    pivot = pivot.drop(columns="mean_abs_shift")
 
-ispstats_dcm_gene = InSilicoPerturberStats(
-    mode="aggregate_gene_shifts",
-    genes_perturbed="all",
-    combos=0,
-    cell_states_to_model=dcm_states,
-    model_version="V2",
-)
+    pivot.to_csv(STATS_DIR / "tf_ion_channel_pivot.csv")
+    print("\nTF x Ion Channel pivot table:")
+    print(pivot.to_string())
 
-ispstats_dcm_gene.get_stats(
-    input_data_directory=str(ISP_OUTPUT_DIR_DCM),
-    null_dist_data_directory=None,
-    output_directory=str(GENE_STATS_DIR),
-    output_prefix="dcm_gene_shifts",
-)
+    # === Heatmap ===
+    fig, ax = plt.subplots(figsize=(max(8, len(pivot.columns) * 0.8),
+                                     max(6, len(pivot) * 0.35)))
+    im = ax.imshow(pivot.values, cmap="RdBu_r", aspect="auto",
+                   vmin=-np.max(np.abs(pivot.values)),
+                   vmax=np.max(np.abs(pivot.values)))
+    ax.set_xticks(range(len(pivot.columns)))
+    ax.set_xticklabels(pivot.columns, rotation=45, ha="right", fontsize=9)
+    ax.set_yticks(range(len(pivot.index)))
+    ax.set_yticklabels(pivot.index, fontsize=9)
+    ax.set_xlabel("Ion Channel Gene")
+    ax.set_ylabel("Deleted TF")
+    ax.set_title("Embedding shift per ion channel when TF is deleted\n"
+                 "(negative = larger change, potential disruption)")
+    plt.colorbar(im, ax=ax, label="Mean cosine similarity shift")
+    fig.patch.set_alpha(0)
+    ax.patch.set_alpha(0)
+    plt.tight_layout()
+    fig.savefig(STATS_DIR / "tf_ion_channel_heatmap.png", dpi=150, transparent=True)
+    print(f"\nHeatmap saved to {STATS_DIR / 'tf_ion_channel_heatmap.png'}")
 
-# %%
-print("=" * 60)
-print("Aggregating gene shifts: HCM -> NF")
-print("=" * 60)
-
-ispstats_hcm_gene = InSilicoPerturberStats(
-    mode="aggregate_gene_shifts",
-    genes_perturbed="all",
-    combos=0,
-    cell_states_to_model=hcm_states,
-    model_version="V2",
-)
-
-ispstats_hcm_gene.get_stats(
-    input_data_directory=str(ISP_OUTPUT_DIR_HCM),
-    null_dist_data_directory=None,
-    output_directory=str(GENE_STATS_DIR),
-    output_prefix="hcm_gene_shifts",
-)
-
-# %% [markdown]
-# ## Step 4: Extract ion channel shifts and build TF x ion channel matrix
+    # === Top interactions ===
+    print(f"\nTop 20 TF -> ion channel interactions (largest shifts):")
+    print(df_ic.head(20)[["tf_name", "affected_gene", "mean_cosine_shift", "n_cells"]]
+          .to_string(index=False))
+else:
+    print("No ion channel genes found in perturbation output.")
 
 # %%
-# Load the gene-level shift results
-# The output format from aggregate_gene_shifts is CSV with per-gene cosine shifts
-dcm_gene_files = sorted(GENE_STATS_DIR.glob("dcm_gene_shifts*.csv"))
-hcm_gene_files = sorted(GENE_STATS_DIR.glob("hcm_gene_shifts*.csv"))
-
-print(f"DCM gene shift files: {dcm_gene_files}")
-print(f"HCM gene shift files: {hcm_gene_files}")
-
-# %%
-# Load token dictionary for gene name mapping
-from geneformer import TOKEN_DICTIONARY_FILE, ENSEMBL_DICTIONARY_FILE
-
-with open(TOKEN_DICTIONARY_FILE, "rb") as f:
-    token_dict = pickle.load(f)
-gene_token_dict = {v: k for k, v in token_dict.items()}
-
-with open(ENSEMBL_DICTIONARY_FILE, "rb") as f:
-    ensembl_dict = pickle.load(f)
-token_to_ensembl = {v: k for k, v in ensembl_dict.items()}
-
-# Map ion channel Ensembl IDs to gene names for display
-ion_channel_names = {}
-for ens_id in ion_channel_genes:
-    if ens_id in ensembl_dict:
-        ion_channel_names[ens_id] = ensembl_dict[ens_id]
-    else:
-        ion_channel_names[ens_id] = ens_id
-
-print(f"Ion channel gene mapping:")
-for ens_id, name in ion_channel_names.items():
-    print(f"  {ens_id} -> {name}")
-
-# %%
-# Build TF x ion channel shift matrices
-# The exact format depends on InSilicoPerturberStats output; we handle common formats
-def build_shift_matrix(gene_shift_files, tfs_list, ion_channels, ensembl_dict):
-    """Build a TF x ion channel shift matrix from gene shift CSV files."""
-    if not gene_shift_files:
-        print("No gene shift files found.")
-        return None
-
-    # Try to load and parse the gene shift data
-    all_data = []
-    for f in gene_shift_files:
-        df = pd.read_csv(f)
-        all_data.append(df)
-        print(f"Loaded {f}: shape {df.shape}, columns {df.columns.tolist()}")
-
-    combined = pd.concat(all_data, ignore_index=True)
-
-    # The output may have columns like Gene, Ensembl_ID, shift values
-    # Try to pivot into TF x target gene matrix
-    print(f"\nCombined shape: {combined.shape}")
-    print(f"Sample rows:\n{combined.head(10).to_string()}")
-
-    return combined
-
-
-dcm_shifts = build_shift_matrix(dcm_gene_files, top_tfs_dcm, ion_channel_genes, ensembl_dict)
-hcm_shifts = build_shift_matrix(hcm_gene_files, top_tfs_hcm, ion_channel_genes, ensembl_dict)
-
-# %%
-# Save results
-if dcm_shifts is not None:
-    dcm_shifts.to_csv(GENE_STATS_DIR / "dcm_tf_ion_channel_shifts.csv", index=False)
-    print(f"Saved DCM TF x ion channel shifts")
-
-if hcm_shifts is not None:
-    hcm_shifts.to_csv(GENE_STATS_DIR / "hcm_tf_ion_channel_shifts.csv", index=False)
-    print(f"Saved HCM TF x ion channel shifts")
-
-# %%
-print("=" * 60)
-print("PER-GENE IMPACT EXTRACTION COMPLETE (Phase 2D)")
-print("=" * 60)
-print(f"\nOutputs saved to: {OUTPUT_DIR}")
-print(f"  DCM gene perturbation: {ISP_OUTPUT_DIR_DCM}")
-print(f"  HCM gene perturbation: {ISP_OUTPUT_DIR_HCM}")
-print(f"  Gene shift statistics: {GENE_STATS_DIR}")
+print(f"\n{'='*60}")
+print("PHASE 2D COMPLETE")
+print(f"{'='*60}")
+print(f"Results saved to: {STATS_DIR}")
+print(f"  - all_gene_shifts.csv: All TF x gene shifts")
+print(f"  - tf_ion_channel_shifts.csv: Filtered for ion channels")
+print(f"  - tf_ion_channel_pivot.csv: Pivot table (TF rows x IC columns)")
+print(f"  - tf_ion_channel_heatmap.png: Visualization")

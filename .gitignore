@@ -1,3 +1,19 @@
+# Data, models, and outputs (large files)
+data/
+models/
+outputs/
+notebooks/
+docs/ref/
+docs/slides/
+*.pdf
+
+# LaTeX build artifacts
+*.aux
+*.nav
+*.out
+*.snm
+*.toc
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
